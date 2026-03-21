@@ -205,6 +205,13 @@ def generate_incoming_job(machines_df: pd.DataFrame, seed: int = RANDOM_SEED) ->
     return generate_random_job(9001, machines_df, rng)
 
 
+def generate_incoming_jobs(machines_df: pd.DataFrame, count: int = 3, seed: int = RANDOM_SEED) -> pd.DataFrame:
+    """Generate a small batch of new incoming requisitions."""
+    rng = _rng(seed + 202)
+    jobs = [generate_random_job(9001 + idx, machines_df, rng) for idx in range(count)]
+    return pd.DataFrame(jobs)
+
+
 def ensure_sample_history(seed: int = RANDOM_SEED) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Load historical sample data if present, otherwise generate and persist it."""
     data_dir = ensure_data_dir()

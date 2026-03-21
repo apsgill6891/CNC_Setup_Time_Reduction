@@ -137,3 +137,64 @@ def explain_recommendation(best: pd.Series, manual: pd.Series, wrong: pd.Series)
 def queue_burden_summary(queue_df: pd.DataFrame, machines_df: pd.DataFrame) -> pd.DataFrame:
     """Summarize queue burden and utilization proxy by machine."""
     return utilization_proxy(queue_df, machines_df)
+
+
+def apply_insertion(queue_df: pd.DataFrame, machine_id: str, insert_at: int, new_job: pd.Series) -> pd.DataFrame:
+    """Return a new queue with the selected job inserted on the selected machine."""
+    queue_copy = queue_df.copy()
+    machine_queue = queue_copy[queue_copy["machine_id"] == machine_id].copy().reset_index(drop=True)
+    inserted = pd.concat([machine_queue.iloc[:insert_at], pd.DataFrame([new_job]), machine_queue.iloc[insert_at:]], ignore_index=True)
+    inserted["machine_id"] = machine_id
+    other = queue_copy[queue_copy["machine_id"] != machine_id].copy()
+    combined = pd.concat([other, inserted], ignore_index=True)
+    combined["queue_position"] = combined.groupby("machine_id").cumcount()
+    return combined
+
+
+def simulate_requisition_batch(
+    machines_df: pd.DataFrame,
+    base_queue_df: pd.DataFrame,
+    requisitions_df: pd.DataFrame,
+    weights: Dict[str, float],
+    annual_setup_volume: int,
+) -> pd.DataFrame:
+    """Simulate cumulative setup burden for a batch of requisitions under different strategies."""
+    summaries = []
+    for strategy in ["optimized", "manual", "obvious"]:
+        queue_df = base_queue_df.copy()
+        total_minutes = 0.0
+        total_cost = 0.0
+        feasible_count = 0
+        for _, req in requisitions_df.iterrows():
+            candidates = evaluate_candidate_insertions(
+                machines_df=machines_df,
+                queue_df=queue_df,
+                new_job=req,
+                weights=weights,
+                annual_setup_volume=annual_setup_volume,
+            )
+            if candidates.empty:
+                continue
+            feasible_count += 1
+            if strategy == "optimized":
+                choice = candidates.iloc[0]
+                label = "Optimized batch"
+            elif strategy == "manual":
+                choice = select_manual_decision(candidates)
+                label = "Manual batch"
+            else:
+                choice = select_wrong_obvious_decision(candidates)
+                label = "Obvious-choice batch"
+            total_minutes += float(choice["net_incremental_setup_minutes"])
+            total_cost += float(choice["net_incremental_setup_cost"])
+            queue_df = apply_insertion(queue_df, str(choice["machine_id"]), int(choice["insert_at"]), req)
+        summaries.append(
+            {
+                "strategy": label,
+                "requisitions_scheduled": feasible_count,
+                "total_setup_minutes": total_minutes,
+                "total_setup_cost": total_cost,
+                "annualized_cost_proxy": total_cost * annual_setup_volume,
+            }
+        )
+    return pd.DataFrame(summaries)
