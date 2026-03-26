@@ -23,10 +23,11 @@ from config import (
     TOLERANCE_CLASSES,
 )
 from data_simulator import (
-    ensure_sample_history,
     generate_current_shop_state,
+    generate_jobs_history,
     generate_incoming_jobs,
     generate_machines_df,
+    generate_transitions_history,
 )
 from optimizer import (
     compare_scenarios,
@@ -49,7 +50,10 @@ st.set_page_config(
 def load_base_data(seed: int) -> Dict[str, pd.DataFrame]:
     """Load reusable base datasets for the simulator."""
     machines_df = generate_machines_df()
-    jobs_history_df, transitions_history_df = ensure_sample_history(seed)
+    jobs_history_df = generate_jobs_history(machines_df, seed=seed, n_jobs=180)
+    transitions_history_df = generate_transitions_history(
+        jobs_history_df, machines_df, seed=seed, n_transitions=360, noise_level=DEFAULT_NOISE_LEVEL
+    )
     _active_df, queue_df = generate_current_shop_state(machines_df, seed=seed)
     return {
         "machines": machines_df,
@@ -63,12 +67,42 @@ def initialize_state() -> None:
     """Initialize persistent Streamlit state."""
     st.session_state.setdefault("seed", RANDOM_SEED)
     st.session_state.setdefault("requisition_count", 3)
+    st.session_state.setdefault("dataset_key", "Baseline sample")
 
 
 
 def build_requisition_batch(machines_df: pd.DataFrame, seed: int, count: int) -> pd.DataFrame:
     """Create a reproducible requisition batch for the workbench."""
     return generate_incoming_jobs(machines_df, count=count, seed=seed).copy().reset_index(drop=True)
+
+
+@st.cache_data(show_spinner=False)
+def load_sample_dataset_catalog() -> Dict[str, Dict[str, object]]:
+    """Build deterministic sample datasets users can run end-to-end."""
+    dataset_specs = [
+        {"name": "Baseline sample", "seed": RANDOM_SEED, "noise": 0.12, "requisitions": 3},
+        {"name": "High-mix titanium", "seed": RANDOM_SEED + 81, "noise": 0.2, "requisitions": 4},
+        {"name": "Rush-heavy queue", "seed": RANDOM_SEED + 143, "noise": 0.26, "requisitions": 5},
+    ]
+    machines_df = generate_machines_df()
+    catalog: Dict[str, Dict[str, object]] = {}
+    for spec in dataset_specs:
+        jobs_df = generate_jobs_history(machines_df, seed=spec["seed"], n_jobs=180)
+        transitions_df = generate_transitions_history(
+            jobs_df, machines_df, seed=spec["seed"], n_transitions=360, noise_level=float(spec["noise"])
+        )
+        _active_df, queue_df = generate_current_shop_state(machines_df, seed=spec["seed"])
+        requisitions_df = generate_incoming_jobs(machines_df, count=spec["requisitions"], seed=spec["seed"] + 301)
+        catalog[spec["name"]] = {
+            "seed": spec["seed"],
+            "noise_level": spec["noise"],
+            "machines_df": machines_df.copy(),
+            "jobs_history_df": jobs_df.copy(),
+            "transitions_history_df": transitions_df.copy(),
+            "queue_df": queue_df.copy(),
+            "requisitions_df": requisitions_df.copy().reset_index(drop=True),
+        }
+    return catalog
 
 
 
@@ -171,27 +205,63 @@ def recommendation_context(candidate_df: pd.DataFrame, comparison_df: pd.DataFra
 def main() -> None:
     """Render the full CNC scheduling simulator experience."""
     initialize_state()
-    base_data = load_base_data(st.session_state.seed)
-    machines_df = base_data["machines"].copy()
-    queue_df = base_data["queue"].copy()
-    transitions_history_df = base_data["transitions_history"].copy()
-
     st.sidebar.title("Simulation Controls")
-    requisition_count = st.sidebar.slider(
-        "New part requisitions in batch", min_value=1, max_value=5, value=st.session_state.requisition_count, step=1
+    dataset_catalog = load_sample_dataset_catalog()
+    dataset_names = list(dataset_catalog.keys())
+    st.session_state.dataset_key = st.sidebar.selectbox(
+        "Sample data pack",
+        dataset_names,
+        index=dataset_names.index(st.session_state.dataset_key) if st.session_state.dataset_key in dataset_names else 0,
+        help="Each sample pack includes machine queues, requisitions, and history so all modules run immediately.",
     )
-    st.session_state.requisition_count = requisition_count
-    if st.sidebar.button("Randomize requisition batch", use_container_width=True):
-        st.session_state.seed += 17
-        st.rerun()
-    if st.sidebar.button("Reset simulation", use_container_width=True):
-        st.session_state.seed = RANDOM_SEED
-        st.rerun()
+    selected_dataset = dataset_catalog[st.session_state.dataset_key]
+    machines_df = selected_dataset["machines_df"].copy()
+    queue_df = selected_dataset["queue_df"].copy()
+    transitions_history_df = selected_dataset["transitions_history_df"].copy()
+    requisitions_df = selected_dataset["requisitions_df"].copy()
+    st.session_state.requisition_count = len(requisitions_df)
+
+    uploaded_requisitions = st.sidebar.file_uploader("Optional: upload requisition CSV", type=["csv"])
+    required_req_columns = [
+        "job_id",
+        "part_family",
+        "operation_type",
+        "material",
+        "size_class",
+        "tolerance_class",
+        "fixture_type",
+        "estimated_run_time_minutes",
+        "batch_size",
+        "rush_flag",
+        "complexity_score",
+        "number_of_operations",
+        "due_date_priority",
+        "required_machine_type",
+        "tool_family_primary",
+    ]
+    if uploaded_requisitions is not None:
+        uploaded_df = pd.read_csv(uploaded_requisitions)
+        missing_columns = [col for col in required_req_columns if col not in uploaded_df.columns]
+        if missing_columns:
+            st.sidebar.error(f"CSV missing required columns: {', '.join(missing_columns)}")
+            st.stop()
+        requisitions_df = uploaded_df[required_req_columns].copy().reset_index(drop=True)
+        st.sidebar.success(f"Loaded {len(requisitions_df)} requisitions from CSV.")
+
+    st.sidebar.caption(
+        "Click through modules below to run: (1) candidate insertion engine, (2) scenario comparison, (3) batch simulation."
+    )
 
     annual_setup_volume = st.sidebar.slider(
         "Annual setup events assumption", min_value=500, max_value=10000, value=ANNUAL_SETUP_VOLUME, step=100
     )
-    noise_level = st.sidebar.slider("Historical noise level", 0.0, 0.35, DEFAULT_NOISE_LEVEL, 0.01)
+    noise_level = st.sidebar.slider(
+        "Historical noise level",
+        0.0,
+        0.35,
+        float(selected_dataset["noise_level"]) if uploaded_requisitions is None else DEFAULT_NOISE_LEVEL,
+        0.01,
+    )
 
     st.sidebar.subheader("Machine hourly rates")
     rate_overrides = {}
@@ -206,7 +276,6 @@ def main() -> None:
     for key, value in DEFAULT_WEIGHTS.items():
         weights[key] = st.sidebar.slider(key.replace("_", " ").title(), 0.0, 30.0, float(value), 1.0)
 
-    requisitions_df = build_requisition_batch(machines_df, st.session_state.seed + 301, requisition_count)
     selected_idx = st.sidebar.selectbox(
         "Active requisition", options=list(range(len(requisitions_df))), format_func=lambda i: requisitions_df.loc[i, "job_id"]
     )
@@ -246,6 +315,10 @@ def main() -> None:
     )
 
     render_top_metrics(best, comparison_df, utilization_df, annual_setup_volume)
+    module_status_cols = st.columns(3)
+    module_status_cols[0].success(f"Module 1: Candidate engine ran ({len(candidate_df)} insertion options)")
+    module_status_cols[1].success(f"Module 2: Scenario comparison ran ({len(comparison_df)} strategies)")
+    module_status_cols[2].success(f"Module 3: Batch simulation ran ({len(batch_summary_df)} strategy totals)")
     st.info(explanation)
 
     exec_tab, shop_tab, requisition_tab, engine_tab, compare_tab, history_tab, method_tab = st.tabs(

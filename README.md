@@ -35,6 +35,18 @@ Start the Streamlit simulator:
 streamlit run app.py
 ```
 
+## Running all 3 modules with sample data
+The app now ships with built-in sample data packs so users can run the full flow immediately:
+1. **Candidate insertion engine**
+2. **Scenario comparison (optimized vs manual vs obvious)**
+3. **Batch simulation**
+
+In the sidebar, choose **Sample data pack** (Baseline, High-mix titanium, or Rush-heavy queue).  
+Optionally upload your own requisition CSV to replace the incoming requisition batch while still using the sample machine queue and history.
+
+Required CSV columns:
+`job_id, part_family, operation_type, material, size_class, tolerance_class, fixture_type, estimated_run_time_minutes, batch_size, rush_flag, complexity_score, number_of_operations, due_date_priority, required_machine_type, tool_family_primary`
+
 ## How to deploy
 If you are using Streamlit Community Cloud or another hosted Streamlit service, point the deployment at `streamlit_app.py` or `app.py`. If you point a website at the repository homepage instead, you may only see the README rather than the live simulator.
 
